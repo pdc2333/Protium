@@ -1,0 +1,8 @@
+qq=input().split(",")
+x=int(qq[0])
+y=int(qq[1])
+ww=input().split(",")
+a=int(ww[0])
+d=int(ww[1])
+m=((x-a)**2+(y-d)**2)**(1/2)
+print(f"{m:.2f}")

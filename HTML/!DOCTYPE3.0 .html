@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebAR Saturn Particle System</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050508; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
+        /* 这里的背景使用了深色径向渐变，模拟宇宙深处 */
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; background: radial-gradient(circle at center, #1b1b24 0%, #000000 100%); }
+        
+        /* 视频窗口放小一点，放在左上角作为监视器 */
+        #video-input { position: absolute; top: 20px; left: 20px; width: 120px; height: 90px; z-index: 2; opacity: 0.4; transform: scaleX(-1); border: 1px solid #444; border-radius: 4px; transition: opacity 0.3s; }
+        #video-input:hover { opacity: 0.8; }
+        
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ccaa88; font-size: 16px; z-index: 10; pointer-events: none; letter-spacing: 3px; font-weight: 300; }
+        
+        #hud { position: absolute; bottom: 30px; left: 30px; color: #888; z-index: 5; font-size: 12px; pointer-events: none; user-select: none; line-height: 1.8; }
+        .hud-key { color: #ccaa88; font-weight: bold; margin-right: 8px; }
+        .instruction { opacity: 0.7; }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "@mediapipe/hands": "https://unpkg.com/@mediapipe/hands@0.4.1675469240/hands.js",
+                "@mediapipe/camera_utils": "https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="loading">SYSTEM INITIALIZING...</div>
+    <video id="video-input" playsinline></video>
+    <div id="canvas-container"></div>
+    
+    <div id="hud">
+        <div><span class="hud-key">🖱️ 鼠标左键</span> 切换图案 (土星 / 文字 / 甜甜圈 / 爱心)</div>
+        <div><span class="hud-key">🖐 移动手掌</span> 旋转视角 (上下左右)</div>
+        <div><span class="hud-key">✊ ↔ 🖐 张合</span> 缩放模型 (张开变大 / 握拳变小)</div>
+    </div>
+
+    <script src="https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- 核心配置 ---
+        const PARTICLE_COUNT = 18000; // 稍微增加数量，但降低单个亮度
+        const PARTICLE_SIZE = 0.45;   // 调小粒子，看起来更精致
+        const PARTICLE_OPACITY = 0.5; // 降低不透明度，防止过曝
+        
+        // 颜色配置 (参考图的暗金色)
+        const COLOR_SATURN = 0xd2b48c; // Tan/Goldish
+        const COLOR_BG_STAR = 0x667788;
+        
+        // 物理参数
+        const SPRING = 0.05; 
+        const DAMPING = 0.90;
+        
+        // --- 状态变量 ---
+        const shapeKeys = ['saturn', 'text', 'torus', 'heart'];
+        let currentShapeIndex = 0;
+        let targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+        
+        // 交互状态
+        let handRot = { x: 0, y: 0 }; // 目标旋转
+        let sceneRot = { x: 0, y: 0 }; // 当前平滑旋转
+        let handOpenness = 0.5; // 0=Fist, 1=Open
+        let currentScale = 1.0;
+        let isHandDetected = false;
+
+        // --- Three.js 场景搭建 ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 40;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        container.appendChild(renderer.domElement);
+
+        // --- 背景星尘 (营造深空感) ---
+        const bgStarsGeo = new THREE.BufferGeometry();
+        const bgStarsPos = [];
+        for(let i=0; i<3000; i++) {
+            bgStarsPos.push(
+                (Math.random() - 0.5) * 400,
+                (Math.random() - 0.5) * 400,
+                -50 - Math.random() * 200 // 放在远处
+            );
+        }
+        bgStarsGeo.setAttribute('position', new THREE.Float32BufferAttribute(bgStarsPos, 3));
+        const bgStarsMat = new THREE.PointsMaterial({
+            color: COLOR_BG_STAR, size: 0.5, transparent: true, opacity: 0.4
+        });
+        const bgStars = new THREE.Points(bgStarsGeo, bgStarsMat);
+        scene.add(bgStars);
+
+        // --- 核心粒子系统 ---
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        const velocities = new Float32Array(PARTICLE_COUNT * 3);
+        
+        // 初始随机分布
+        for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+            positions[i] = (Math.random() - 0.5) * 100;
+            velocities[i] = 0;
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        // 纹理生成：更加柔和的辉光，中心亮边缘快速衰减
+        const getSoftTexture = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)'); // 核心白
+            grad.addColorStop(0.2, 'rgba(255, 230, 200, 0.5)'); // 中间金
+            grad.addColorStop(0.5, 'rgba(255, 200, 150, 0.1)'); // 边缘淡
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0,0,32,32);
+            return new THREE.CanvasTexture(canvas);
+        };
+
+        const material = new THREE.PointsMaterial({
+            color: COLOR_SATURN,
+            size: PARTICLE_SIZE,
+            map: getSoftTexture(),
+            transparent: true,
+            opacity: PARTICLE_OPACITY,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            sizeAttenuation: true
+        });
+
+        const particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        // --- 形状生成算法 ---
+
+        // 1. 土星 (根据参考图调整：本体虚化，光环分层)
+        function generateSaturn() {
+            const arr = new Float32Array(PARTICLE_COUNT * 3);
+            const planetRatio = 0.35; // 35% 粒子做星球，65% 做光环
+            const countPlanet = Math.floor(PARTICLE_COUNT * planetRatio);
+            
+            // 星球本体 (稍微疏松一点，不要太实)
+            for (let i = 0; i < countPlanet; i++) {
+                const r = 9; 
+                // 使用这种分布方式可以让边缘稍微密集一点，显出轮廓
+                const u = Math.random();
+                const v = Math.random();
+                const theta = 2 * Math.PI * u;
+                const phi = Math.acos(2 * v - 1);
+                
+                // 表面分布
+                const x = r * Math.sin(phi) * Math.cos(theta);
+                const y = r * Math.sin(phi) * Math.sin(theta);
+                const z = r * Math.cos(phi);
+                
+                arr[i*3] = x; 
+                arr[i*3+1] = y * 0.95; // 稍微压扁
+                arr[i*3+2] = z;
+            }
+
+            // 光环 (带有卡西尼缝)
+            const ringInner = 12;
+            const ringGapStart = 16;
+            const ringGapEnd = 17.5; // 缝隙
+            const ringOuter = 24;
+
+            for (let i = countPlanet; i < PARTICLE_COUNT; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                let dist = 0;
+                
+                // 随机决定是在内环还是外环，模拟缝隙
+                if (Math.random() > 0.4) {
+                    // 外环
+                    dist = Math.sqrt(Math.random() * (ringOuter**2 - ringGapEnd**2) + ringGapEnd**2);
+                } else {
+                    // 内环
+                    dist = Math.sqrt(Math.random() * (ringGapStart**2 - ringInner**2) + ringInner**2);
+                }
+
+                arr[i*3] = dist * Math.cos(angle);
+                arr[i*3+1] = (Math.random() - 0.5) * 0.3; // 极薄
+                arr[i*3+2] = dist * Math.sin(angle);
+                
+                // 整体倾斜 25度
+                const tilt = 0.43; // ~25 deg
+                const y = arr[i*3+1];
+                const z = arr[i*3+2];
+                arr[i*3+1] = y * Math.cos(tilt) - z * Math.sin(tilt);
+                arr[i*3+2] = y * Math.sin(tilt) + z * Math.cos(tilt);
+            }
+            return arr;
+        }
+
+        function generateText() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 300; canvas.height = 150;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#000'; ctx.fillRect(0,0,300,150);
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 50px Arial';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText('I LOVE YOU', 150, 75);
+            const data = ctx.getImageData(0,0,300,150).data;
+            
+            const validPixels = [];
+            for(let y=0; y<150; y+=2) {
+                for(let x=0; x<300; x+=2) {
+                    if(data[(y*300+x)*4] > 100) validPixels.push({x: (x-150)*0.2, y: -(y-75)*0.2});
+                }
+            }
+            const arr = new Float32Array(PARTICLE_COUNT*3);
+            for(let i=0; i<PARTICLE_COUNT; i++){
+                const p = validPixels[i%validPixels.length];
+                arr[i*3] = p.x * 2.5 + (Math.random()-0.5);
+                arr[i*3+1] = p.y * 2.5 + (Math.random()-0.5);
+                arr[i*3+2] = (Math.random()-0.5)*2;
+            }
+            return arr;
+        }
+
+        function generateTorus() {
+            const arr = new Float32Array(PARTICLE_COUNT * 3);
+            const R = 12; const r = 4;
+            for(let i=0; i<PARTICLE_COUNT; i++){
+                const u = Math.random() * Math.PI * 2;
+                const v = Math.random() * Math.PI * 2;
+                arr[i*3] = (R + r*Math.cos(v)) * Math.cos(u);
+                arr[i*3+1] = (R + r*Math.cos(v)) * Math.sin(u);
+                arr[i*3+2] = r*Math.sin(v);
+            }
+            return arr;
+        }
+
+        function generateHeart() {
+            const arr = new Float32Array(PARTICLE_COUNT * 3);
+            for(let i=0; i<PARTICLE_COUNT; i++){
+                let x,y,z,v=false;
+                while(!v){
+                    x=(Math.random()-0.5)*4; y=(Math.random()-0.5)*4; z=(Math.random()-0.5)*2;
+                    if(Math.pow(x*x+y*y-1,3) - x*x*y*y*y <= 0) v=true;
+                }
+                arr[i*3] = x*12; arr[i*3+1] = y*12+2; arr[i*3+2] = z*6;
+            }
+            return arr;
+        }
+
+        const shapes = {
+            saturn: generateSaturn(),
+            text: generateText(),
+            torus: generateTorus(),
+            heart: generateHeart()
+        };
+
+        // 默认目标
+        targetPositions.set(shapes.saturn);
+
+        // --- 鼠标切换逻辑 ---
+        window.addEventListener('mousedown', () => {
+            currentShapeIndex = (currentShapeIndex + 1) % shapeKeys.length;
+            const key = shapeKeys[currentShapeIndex];
+            targetPositions.set(shapes[key]);
+            
+            // 简单的随机散开，增加切换动感
+            for(let i=0; i<PARTICLE_COUNT; i++) {
+                velocities[i*3] += (Math.random()-0.5) * 0.5;
+                velocities[i*3+1] += (Math.random()-0.5) * 0.5;
+                velocities[i*3+2] += (Math.random()-0.5) * 0.5;
+            }
+        });
+
+        // --- MediaPipe 逻辑 (旋转 & 缩放) ---
+        const videoElement = document.getElementById('video-input');
+
+        function onResults(results) {
+            document.getElementById('loading').style.display = 'none';
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                isHandDetected = true;
+                const lm = results.multiHandLandmarks[0];
+
+                // 1. 计算手掌中心 (用于旋转)
+                // 屏幕坐标 0~1，我们需要映射到旋转角度
+                // 0.5 是中心。
+                let cx = 0, cy = 0;
+                // 取手腕(0), 食指根(5), 小指根(17)做个稳定三角中心
+                cx = (lm[0].x + lm[5].x + lm[17].x) / 3;
+                cy = (lm[0].y + lm[5].y + lm[17].y) / 3;
+
+                // 映射: 手在最左(1.0) -> 旋转 +1弧度; 手在最右(0.0) -> 旋转 -1弧度 (注意镜像)
+                // Y轴: 手在上(0.0) -> 抬头; 手在下(1.0) -> 低头
+                handRot.y = (cx - 0.5) * 3.0; // 左右灵敏度
+                handRot.x = (cy - 0.5) * 2.5; // 上下灵敏度
+
+                // 2. 计算张手/合手 (用于缩放)
+                // 算法：计算指尖 (4,8,12,16,20) 到 手腕(0) 的平均距离
+                let totalDist = 0;
+                const tips = [4, 8, 12, 16, 20];
+                tips.forEach(idx => {
+                    const d = Math.sqrt(Math.pow(lm[idx].x - lm[0].x, 2) + Math.pow(lm[idx].y - lm[0].y, 2));
+                    totalDist += d;
+                });
+                const avgDist = totalDist / 5;
+
+                // 经验值：握拳时 avgDist 约 0.15-0.2，张手时 约 0.35-0.5
+                // 归一化到 0~1
+                let openFactor = (avgDist - 0.15) / (0.4 - 0.15); 
+                openFactor = Math.max(0, Math.min(1, openFactor)); // Clamp
+                
+                handOpenness = openFactor;
+
+            } else {
+                isHandDetected = false;
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => `https://unpkg.com/@mediapipe/hands@0.4.1675469240/${file}`});
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+        cameraUtils.start();
+
+        // --- 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 1. 物理更新粒子位置
+            const pos = geometry.attributes.position.array;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const ix = i*3, iy = i*3+1, iz = i*3+2;
+                
+                // 弹簧力
+                const ax = (targetPositions[ix] - pos[ix]) * SPRING;
+                const ay = (targetPositions[iy] - pos[iy]) * SPRING;
+                const az = (targetPositions[iz] - pos[iz]) * SPRING;
+
+                velocities[ix] += ax;
+                velocities[iy] += ay;
+                velocities[iz] += az;
+
+                velocities[ix] *= DAMPING;
+                velocities[iy] *= DAMPING;
+                velocities[iz] *= DAMPING;
+
+                pos[ix] += velocities[ix];
+                pos[iy] += velocities[iy];
+                pos[iz] += velocities[iz];
+            }
+            geometry.attributes.position.needsUpdate = true;
+
+            // 2. 处理交互 (旋转 & 缩放)
+            if (isHandDetected) {
+                // 平滑旋转
+                sceneRot.x += (handRot.x - sceneRot.x) * 0.1;
+                sceneRot.y += (handRot.y - sceneRot.y) * 0.1;
+
+                // 平滑缩放
+                // handOpenness: 0(拳) -> 0.5倍缩放, 1(张) -> 1.5倍缩放
+                const targetScale = 0.5 + handOpenness * 1.0; 
+                currentScale += (targetScale - currentScale) * 0.1;
+
+            } else {
+                // 手移开后，缓慢回正，或者保留在最后位置？这里选择缓慢回正到初始角度
+                sceneRot.x += (0 - sceneRot.x) * 0.05;
+                sceneRot.y += (0 - sceneRot.y) * 0.05;
+                currentScale += (1.0 - currentScale) * 0.05;
+            }
+
+            // 应用旋转 (注意是粒子容器旋转，模拟相机环绕)
+            particles.rotation.x = sceneRot.x;
+            particles.rotation.y = sceneRot.y;
+            // 额外加上一点点极其缓慢的自转，让它活着
+            particles.rotation.z += 0.0005; 
+
+            // 应用缩放
+            particles.scale.set(currentScale, currentScale, currentScale);
+
+            // 背景星星微动
+            bgStars.rotation.y = sceneRot.y * 0.2; // 视差效果
+            bgStars.rotation.x = sceneRot.x * 0.2;
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>

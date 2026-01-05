@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>熵增交互式可视化 (Entropy Simulation)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.2/p5.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        header {
+            margin-top: 15px;
+            text-align: center;
+        }
+
+        h2 { margin: 0; font-weight: 300; letter-spacing: 2px; color: #00f0ff; }
+        p { font-size: 0.9rem; color: #888; margin: 5px 0 15px 0; }
+
+        #main-container {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+
+        #canvas-container {
+            border: 1px solid #333;
+            box-shadow: 0 0 20px rgba(0, 240, 255, 0.1);
+        }
+
+        #controls {
+            width: 300px;
+            background: #1e1e1e;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        .control-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.9rem; }
+        
+        /* 自定义滑块样式 */
+        input[type=range] {
+            width: 100%;
+            accent-color: #00f0ff;
+        }
+
+        .btn-group { display: flex; gap: 10px; }
+        button {
+            flex: 1;
+            padding: 8px;
+            background: #333;
+            color: white;
+            border: 1px solid #555;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-radius: 4px;
+        }
+        button:hover { background: #444; border-color: #00f0ff; }
+        button.active { background: #00f0ff; color: #000; font-weight: bold; }
+
+        .stat-box {
+            background: #252525;
+            padding: 10px;
+            margin-top: 20px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .stat-value { font-size: 1.5rem; font-family: monospace; color: #ff0055; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h2>ENTROPY VISUALIZATION</h2>
+        <p>从有序到无序：热力学第二定律可视化模拟</p>
+    </header>
+
+    <div id="main-container">
+        <div id="canvas-container"></div>
+        
+        <aside id="controls">
+            <div class="control-group">
+                <label>温度 (粒子速度): <span id="temp-val">1.0</span>x</label>
+                <input type="range" id="temp-slider" min="0.1" max="3.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>容器体积: <span id="vol-val">100</span>%</label>
+                <input type="range" id="vol-slider" min="30" max="100" value="100">
+            </div>
+
+            <div class="btn-group">
+                <button id="btn-start">启动</button>
+                <button id="btn-pause">暂停</button>
+                <button id="btn-reset">重置</button>
+            </div>
+
+            <div class="stat-box">
+                <label>当前熵值 (Normalized)</label>
+                <div class="stat-value" id="entropy-display">0.00</div>
+            </div>
+            
+            <div class="stat-box" style="margin-top:10px; font-size: 0.8rem; color:#666;">
+                系统状态: <span id="status-text">就绪</span>
+            </div>
+        </aside>
+    </div>
+
+    <script>
+        // --- 变量定义 ---
+        let particles = [];
+        const particleCount = 200;
+        let particleSpeed = 2; // 基础速度
+        let temperature = 1.0; // 速度倍率
+        let containerWidth = 600;
+        let containerHeight = 400;
+        let currentWidth = 600;
+        
+        let isRunning = false;
+        
+        // 熵计算相关
+        let entropyHistory = []; // 用于绘制曲线
+        const gridCols = 8; // 网格列数
+        const gridRows = 5; // 网格行数
+        const maxEntropy = Math.log(gridCols * gridRows); // 最大可能的熵 (均匀分布时)
+
+        // UI 元素引用
+        let tempSlider, volSlider, btnStart, btnPause, btnReset;
+        let tempVal, volVal, entropyDisplay, statusText;
+
+        function setup() {
+            // 创建画布
+            let canvas = createCanvas(800, 400); // 右侧留200给图表
+            canvas.parent('canvas-container');
+            
+            // 初始化 UI
+            tempSlider = select('#temp-slider');
+            volSlider = select('#vol-slider');
+            btnStart = select('#btn-start');
+            btnPause = select('#btn-pause');
+            btnReset = select('#btn-reset');
+            tempVal = select('#temp-val');
+            volVal = select('#vol-val');
+            entropyDisplay = select('#entropy-display');
+            statusText = select('#status-text');
+
+            // 绑定事件
+            btnStart.mousePressed(() => { isRunning = true; statusText.html("扩散中..."); });
+            btnPause.mousePressed(() => { isRunning = false; statusText.html("已暂停"); });
+            btnReset.mousePressed(resetSimulation);
+            
+            tempSlider.input(() => tempVal.html(tempSlider.value()));
+            volSlider.input(() => volVal.html(volSlider.value()));
+
+            resetSimulation();
+        }
+
+        function resetSimulation() {
+            isRunning = false;
+            particles = [];
+            entropyHistory = [];
+            statusText.html("已重置 - 低熵状态");
+            
+            // 初始化粒子：集中在左侧 20% 区域
+            for (let i = 0; i < particleCount; i++) {
+                particles.push(new Particle(random(10, currentWidth * 0.15), random(10, containerHeight - 10)));
+            }
+            
+            // 计算初始熵值
+            calculateEntropy();
+            // 重绘一次以显示初始状态
+            draw(); 
+        }
+
+        function draw() {
+            background(20); // 深色背景
+
+            // 更新参数
+            temperature = float(tempSlider.value());
+            let volPercent = int(volSlider.value());
+            currentWidth = map(volPercent, 0, 100, 0, 600); // 映射容器宽度
+
+            // 1. 绘制容器区域
+            drawContainer();
+
+            // 2. 绘制和更新粒子
+            for (let p of particles) {
+                if (isRunning) p.update();
+                p.show();
+            }
+
+            // 3. 计算并显示熵
+            if (frameCount % 5 === 0) { // 每5帧计算一次，优化性能
+                calculateEntropy();
+            }
+
+            // 4. 绘制右侧熵值曲线图
+            drawEntropyGraph();
+        }
+
+        // --- 粒子类 ---
+        class Particle {
+            constructor(x, y) {
+                this.pos = createVector(x, y);
+                this.vel = p5.Vector.random2D().mult(particleSpeed); // 随机方向
+                this.history = []; // 轨迹
+            }
+
+            update() {
+                // 速度受温度影响
+                let actualVel = this.vel.copy().mult(temperature);
+                this.pos.add(actualVel);
+
+                // 记录轨迹 (只保留最近10个点)
+                this.history.push(this.pos.copy());
+                if (this.history.length > 10) this.history.shift();
+
+                // 边界碰撞检测 (容器墙壁)
+                if (this.pos.x < 0) { this.pos.x = 0; this.vel.x *= -1; }
+                if (this.pos.x > currentWidth) { this.pos.x = currentWidth; this.vel.x *= -1; }
+                if (this.pos.y < 0) { this.pos.y = 0; this.vel.y *= -1; }
+                if (this.pos.y > containerHeight) { this.pos.y = containerHeight; this.vel.y *= -1; }
+            }
+
+            show() {
+                // 绘制轨迹
+                noFill();
+                stroke(0, 240, 255, 100); // 青色半透明
+                strokeWeight(1);
+                beginShape();
+                for (let v of this.history) {
+                    vertex(v.x, v.y);
+                }
+                endShape();
+
+                // 绘制粒子本体
+                noStroke();
+                fill(0, 240, 255);
+                ellipse(this.pos.x, this.pos.y, 4);
+            }
+        }
+
+        // --- 辅助功能 ---
+
+        function drawContainer() {
+            // 绘制容器边界
+            stroke(80);
+            strokeWeight(2);
+            noFill();
+            rect(0, 0, currentWidth, containerHeight);
+
+            // 绘制辅助网格 (淡淡的)
+            stroke(40);
+            strokeWeight(1);
+            let cellW = currentWidth / gridCols;
+            let cellH = containerHeight / gridRows;
+
+            for (let i = 1; i < gridCols; i++) line(i * cellW, 0, i * cellW, containerHeight);
+            for (let j = 1; j < gridRows; j++) line(0, j * cellH, currentWidth, j * cellH);
+            
+            // 绘制挡板 (如果有体积压缩)
+            if (currentWidth < 600) {
+                fill(30);
+                noStroke();
+                rect(currentWidth, 0, 600 - currentWidth, containerHeight);
+                stroke(255, 0, 85); // 红色警戒线
+                line(currentWidth, 0, currentWidth, containerHeight);
+            }
+        }
+
+        function calculateEntropy() {
+            // 初始化网格计数
+            let bins = new Array(gridCols * gridRows).fill(0);
+            let cellW = currentWidth / gridCols;
+            let cellH = containerHeight / gridRows;
+
+            // 统计每个粒子所在的网格
+            for (let p of particles) {
+                // 确保坐标在有效范围内
+                let c = floor(constrain(p.pos.x, 0, currentWidth - 0.1) / cellW);
+                let r = floor(constrain(p.pos.y, 0, containerHeight - 0.1) / cellH);
+                let index = r * gridCols + c;
+                if (index >= 0 && index < bins.length) {
+                    bins[index]++;
+                }
+            }
+
+            // 计算香农熵
+            let entropy = 0;
+            for (let count of bins) {
+                if (count > 0) {
+                    let p = count / particleCount;
+                    entropy -= p * Math.log(p);
+                }
+            }
+
+            // 归一化 (0 - 1)
+            let normalizedEntropy = entropy / maxEntropy;
+            
+            // 更新 UI 和历史数据
+            entropyDisplay.html(nf(normalizedEntropy, 1, 3));
+            entropyHistory.push(normalizedEntropy);
+            
+            // 保持曲线图数据长度
+            if (entropyHistory.length > 180) entropyHistory.shift();
+        }
+
+        function drawEntropyGraph() {
+            // 图表区域：x=610 到 800
+            let graphX = 620;
+            let graphY = 50;
+            let graphW = 160;
+            let graphH = 300;
+
+            // 背景
+            fill(30);
+            noStroke();
+            rect(graphX, graphY, graphW, graphH);
+
+            // 标题
+            fill(200);
+            noStroke();
+            textSize(12);
+            textAlign(CENTER);
+            text("熵值随时间变化", graphX + graphW/2, graphY - 10);
+
+            // 绘制曲线
+            noFill();
+            stroke(255, 0, 85); // 品红曲线
+            strokeWeight(2);
+            beginShape();
+            for (let i = 0; i < entropyHistory.length; i++) {
+                let x = map(i, 0, 180, graphX, graphX + graphW);
+                // y轴反转，1在上面，0在下面
+                let y = map(entropyHistory[i], 0, 1, graphY + graphH, graphY);
+                vertex(x, y);
+            }
+            endShape();
+            
+            // 绘制基准线 (Max Entropy)
+            stroke(100);
+            strokeWeight(1);
+            drawingContext.setLineDash([5, 5]); // 虚线
+            let maxY = graphY; 
+            line(graphX, maxY, graphX + graphW, maxY);
+            drawingContext.setLineDash([]); // 恢复实线
+            
+            fill(100);
+            noStroke();
+            textAlign(RIGHT);
+            text("Max", graphX - 5, maxY + 5);
+            text("0", graphX - 5, graphY + graphH);
+        }
+    </script>
+</body>
+</html>

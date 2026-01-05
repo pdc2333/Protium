@@ -1,0 +1,6 @@
+name = input().strip()
+a = float(input().strip())
+v = float(input().strip())
+length = (v ** 2) / (2 * a)
+print(f"The acceleration of {name} is {a:.2f} M / s, the take-off speed is {v:.2f} M / s, \
+and the shortest take-off runway length is {length:.2f} M.")
